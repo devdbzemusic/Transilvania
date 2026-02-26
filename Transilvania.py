@@ -6,8 +6,12 @@ import threading
 import time
 import tkinter as tk
 import webbrowser
+import ctypes
+import re
+from ctypes import wintypes
 from pathlib import Path
 from tkinter import messagebox
+from tkinter.scrolledtext import ScrolledText
 
 import pyautogui
 import pyperclip
@@ -16,9 +20,9 @@ import pytesseract
 import requests
 from deep_translator import GoogleTranslator
 from PIL import Image, ImageDraw, ImageGrab, ImageOps, ImageTk
-from pynput import keyboard
 
 TESSERACT_URL = "https://github.com/UB-Mannheim/tesseract/wiki"
+PROJECT_URL = "https://github.com/devdbzemusic/Transilvania"
 
 logging.basicConfig(
     filename="transilvania.log",
@@ -29,11 +33,16 @@ logging.basicConfig(
 
 class TranslationApp:
     def __init__(self):
+        self._enable_dpi_awareness()
         self.hotkey_key = "d"
         self.hotkey_combo = f"<ctrl>+{self.hotkey_key}"
-        self.ocr_languages = ["eng", "rus", "ara"]
+        self.window_hotkey_combo = f"<ctrl>+<shift>+{self.hotkey_key}"
+        self.ocr_languages = ["eng", "rus", "ukr", "ara"]
         self.listener = None
         self.hotkey = None
+        self.window_hotkey = None
+        self.hotkey_thread = None
+        self.hotkey_thread_id = None
         self.icon = None
         self.overlay = None
         self.last_trigger_ts = 0.0
@@ -45,6 +54,7 @@ class TranslationApp:
         self.tesseract_ready = False
         self.tk_logo = None
         self.bg_photo = None
+        self.about_window = None
 
         self.root = tk.Tk()
         self.root.title("Transilvania - Einstellungen")
@@ -64,7 +74,21 @@ class TranslationApp:
 
         self.start_listener()
         self.start_tray_icon()
-        logging.info("App gestartet. Hotkey=STRG+%s", self.hotkey_key.upper())
+        logging.info(
+            "App gestartet. Hotkeys=STRG+%s | STRG+SHIFT+%s",
+            self.hotkey_key.upper(),
+            self.hotkey_key.upper(),
+        )
+
+    def _enable_dpi_awareness(self):
+        try:
+            user32 = ctypes.windll.user32
+            if hasattr(ctypes.windll, "shcore"):
+                ctypes.windll.shcore.SetProcessDpiAwareness(2)
+            else:
+                user32.SetProcessDPIAware()
+        except Exception:
+            logging.info("DPI-Awareness konnte nicht gesetzt werden (ok).")
 
     def _resource_dirs(self):
         dirs = []
@@ -101,6 +125,13 @@ class TranslationApp:
                 candidate = base / rel
                 if candidate.exists():
                     return candidate
+        return None
+
+    def _find_readme_path(self):
+        for base in self._resource_dirs():
+            candidate = base / "README.md"
+            if candidate.exists():
+                return candidate
         return None
 
     def _local_tessdata_dir(self):
@@ -263,10 +294,15 @@ class TranslationApp:
 
         self.status_label = tk.Label(
             panel,
-            text=f"Aktiv: STRG + {self.hotkey_key.upper()}",
+            text=(
+                f"Aktiv: STRG + {self.hotkey_key.upper()} "
+                f"| Fenster: STRG + SHIFT + {self.hotkey_key.upper()}"
+            ),
             fg="#8ef08e",
             bg="#000000",
             anchor="w",
+            justify="left",
+            wraplength=410,
         )
         self.status_label.pack(fill="x", pady=(6, 0))
 
@@ -285,11 +321,143 @@ class TranslationApp:
 
         tk.Label(
             panel,
-            text="Erst Markierung (Ctrl+C), sonst OCR an Maus.",
+            text="Erst Markierung (Ctrl+C), dann OCR an Maus, dann Dialog-Fenster.",
             font=("Arial", 9),
             fg="#d0d0d0",
             bg="#000000",
         ).pack(pady=(8, 0))
+
+        footer = tk.Frame(root_frame, bg="#0b0b0b")
+        footer.pack(side="bottom", fill="x", pady=(0, 12))
+        tk.Button(
+            footer,
+            text="About / Projekt",
+            command=self.open_about_dialog,
+            width=20,
+        ).pack(anchor="center")
+
+    def _preprocess_for_ocr(self, image):
+        gray = ImageOps.grayscale(image)
+        scale = 2
+        resampling = getattr(Image, "Resampling", Image)
+        enlarged = gray.resize((gray.width * scale, gray.height * scale), resampling.LANCZOS)
+        return ImageOps.autocontrast(enlarged)
+
+    def _extract_text_from_image(self, image):
+        processed = self._preprocess_for_ocr(image)
+        return self._extract_text_multi_config(processed)
+
+    def _extract_text_multi_config(self, processed_image):
+        configs = (
+            "--oem 1 --psm 6",
+            "--oem 1 --psm 11",
+            "--oem 1 --psm 3",
+        )
+        best_text = ""
+        lang = "+".join(self.available_ocr_languages)
+        tessdata_dir = str(self.local_tessdata_dir)
+        for cfg in configs:
+            try:
+                text = pytesseract.image_to_string(
+                    processed_image,
+                    lang=lang,
+                    config=f"{cfg} --tessdata-dir {tessdata_dir}",
+                )
+                text = re.sub(r"\s+", " ", (text or "")).strip()
+                if len(text) > len(best_text):
+                    best_text = text
+            except Exception:
+                logging.exception("OCR-Konfiguration fehlgeschlagen: %s", cfg)
+                try:
+                    text = pytesseract.image_to_string(
+                        processed_image,
+                        lang=lang,
+                        config=cfg,
+                    )
+                    text = re.sub(r"\s+", " ", (text or "")).strip()
+                    if len(text) > len(best_text):
+                        best_text = text
+                except Exception:
+                    pass
+        return best_text
+
+    def _read_window_text(self, hwnd):
+        user32 = ctypes.windll.user32
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length <= 0:
+            return ""
+        buf = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, buf, length + 1)
+        return (buf.value or "").strip()
+
+    def _extract_text_from_foreground_window(self):
+        try:
+            user32 = ctypes.windll.user32
+            fg = user32.GetForegroundWindow()
+            if not fg:
+                return ""
+
+            texts = []
+            window_title = self._read_window_text(fg)
+            if len(window_title) >= 2:
+                texts.append(window_title)
+
+            enum_proc_type = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+
+            @enum_proc_type
+            def _enum_proc(hwnd, _lparam):
+                txt = self._read_window_text(hwnd)
+                if len(txt) >= 2:
+                    texts.append(txt)
+                return True
+
+            user32.EnumChildWindows(fg, _enum_proc, 0)
+            unique = []
+            seen = set()
+            for t in texts:
+                if t not in seen:
+                    seen.add(t)
+                    unique.append(t)
+            return "\n".join(unique).strip()
+        except Exception:
+            logging.exception("Foreground-Window-Text konnte nicht gelesen werden.")
+            return ""
+
+    def _get_window_bbox_at_point(self, x, y):
+        try:
+            user32 = ctypes.windll.user32
+            point = wintypes.POINT(x=x, y=y)
+            hwnd = user32.WindowFromPoint(point)
+            if not hwnd:
+                return None
+
+            # Auf Top-Level-Fenster hochgehen, damit nicht nur ein kleines Control erfasst wird.
+            GA_ROOT = 2
+            root_hwnd = user32.GetAncestor(hwnd, GA_ROOT)
+            if root_hwnd:
+                hwnd = root_hwnd
+
+            rect = wintypes.RECT()
+            if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+                return None
+
+            left, top, right, bottom = rect.left, rect.top, rect.right, rect.bottom
+            width = max(0, right - left)
+            height = max(0, bottom - top)
+            if width < 80 or height < 40:
+                return None
+            return (left, top, right, bottom)
+        except Exception:
+            logging.exception("Fensterrechteck konnte nicht ermittelt werden.")
+            return None
+
+    def _fallback_fullscreen_ocr(self):
+        try:
+            screenshot = ImageGrab.grab()
+            return self._extract_text_from_image(screenshot)
+        except Exception:
+            logging.exception("Fullscreen-OCR fehlgeschlagen.")
+            return ""
 
     def _on_hotkey_input_change(self, event=None):
         raw = (self.hotkey_var.get() or "").strip().lower()
@@ -305,10 +473,20 @@ class TranslationApp:
 
         self.hotkey_key = key
         self.hotkey_combo = f"<ctrl>+{self.hotkey_key}"
+        self.window_hotkey_combo = f"<ctrl>+<shift>+{self.hotkey_key}"
         self.restart_listener()
-        self.status_label.config(text=f"Aktiv: STRG + {self.hotkey_key.upper()}")
+        self.status_label.config(
+            text=(
+                f"Aktiv: STRG + {self.hotkey_key.upper()} "
+                f"| Fenster: STRG + SHIFT + {self.hotkey_key.upper()}"
+            )
+        )
         self.hotkey_var.set(self.hotkey_key)
-        logging.info("Hotkey geaendert auf STRG+%s", self.hotkey_key.upper())
+        logging.info(
+            "Hotkeys geaendert auf STRG+%s und STRG+SHIFT+%s",
+            self.hotkey_key.upper(),
+            self.hotkey_key.upper(),
+        )
 
     def _get_selected_text_from_clipboard(self):
         old_clipboard = ""
@@ -336,7 +514,7 @@ class TranslationApp:
                 except Exception:
                     pass
 
-    def perform_translate(self, prefer_clipboard):
+    def perform_translate(self, prefer_clipboard, force_window, use_ocr_fallback):
         try:
             x, y = pyautogui.position()
             text = ""
@@ -347,6 +525,12 @@ class TranslationApp:
                     logging.info("Text aus Markierung gelesen: %r", text)
 
             if not text:
+                window_text = self._extract_text_from_foreground_window()
+                if window_text:
+                    text = window_text
+                    logging.info("Text aus aktivem Fenster gelesen: %r", text)
+
+            if not text and use_ocr_fallback:
                 if not self.tesseract_ready:
                     self.root.after(
                         0,
@@ -362,28 +546,50 @@ class TranslationApp:
                     self.root.after(
                         0,
                         lambda: self.show_overlay(
-                            "Keine OCR-Sprachdateien verfuegbar. Pruefe Internet/Tesseract-Setup.",
+                        "Keine OCR-Sprachdateien verfuegbar. Pruefe Internet/Tesseract-Setup.",
                             x,
                             max(10, y - 50),
                         ),
                     )
                     return
 
-                bbox = (x - 150, y - 40, x + 150, y + 40)
-                screenshot = ImageGrab.grab(bbox)
-                screenshot = ImageOps.grayscale(screenshot)
-                text = pytesseract.image_to_string(
-                    screenshot,
-                    lang="+".join(self.available_ocr_languages),
-                    config=f'--tessdata-dir "{self.local_tessdata_dir}"',
-                ).strip()
-                logging.info("OCR fallback bei Maus=(%s,%s), OCR=%r", x, y, text)
+                if not force_window:
+                    bbox = (x - 170, y - 55, x + 170, y + 55)
+                    screenshot = ImageGrab.grab(bbox)
+                    text = self._extract_text_from_image(screenshot)
+                    logging.info("OCR Mausbereich bei (%s,%s), OCR=%r", x, y, text)
+
+                if force_window or len(text) < 8:
+                    window_bbox = self._get_window_bbox_at_point(x, y)
+                    if window_bbox:
+                        window_shot = ImageGrab.grab(window_bbox)
+                        window_text = self._extract_text_from_image(window_shot)
+                        if len(window_text) > len(text):
+                            text = window_text
+                        logging.info(
+                            "OCR Fensterbereich bei (%s,%s), bbox=%s, OCR=%r",
+                            x,
+                            y,
+                            window_bbox,
+                            text,
+                        )
+                    elif force_window:
+                        logging.info("Kein Fenster unter Maus gefunden, nutze Fullscreen-OCR.")
+
+                if len(text) < 8:
+                    fullscreen_text = self._fallback_fullscreen_ocr()
+                    if len(fullscreen_text) > len(text):
+                        text = fullscreen_text
+                    logging.info("OCR Fullscreen-Fallback, OCR=%r", text)
 
             if not text or len(text) < 2:
+                msg = "Kein Text erkannt (Markierung/Fenstertext)."
+                if use_ocr_fallback:
+                    msg = "Kein Text erkannt (weder Markierung noch OCR)."
                 self.root.after(
                     0,
                     lambda: self.show_overlay(
-                        "Kein Text erkannt (weder Markierung noch OCR).",
+                        msg,
                         x,
                         max(10, y - 50),
                     ),
@@ -428,7 +634,23 @@ class TranslationApp:
             return
         self.last_trigger_ts = now
         logging.info("Hotkey erkannt: STRG+%s", self.hotkey_key.upper())
-        threading.Thread(target=self.perform_translate, args=(True,), daemon=True).start()
+        threading.Thread(
+            target=self.perform_translate,
+            args=(True, False, False),
+            daemon=True,
+        ).start()
+
+    def on_window_hotkey_pressed(self):
+        now = time.monotonic()
+        if now - self.last_trigger_ts < 0.7:
+            return
+        self.last_trigger_ts = now
+        logging.info("Fenster-Hotkey erkannt: STRG+SHIFT+%s", self.hotkey_key.upper())
+        threading.Thread(
+            target=self.perform_translate,
+            args=(False, True, True),
+            daemon=True,
+        ).start()
 
     def create_tray_icon(self):
         image = None
@@ -456,29 +678,122 @@ class TranslationApp:
         threading.Thread(target=self.create_tray_icon, daemon=True).start()
 
     def start_listener(self):
-        self.hotkey = keyboard.HotKey(
-            keyboard.HotKey.parse(self.hotkey_combo),
-            self.on_hotkey_pressed,
-        )
-        self.listener = keyboard.Listener(
-            on_press=self._on_key_press,
-            on_release=self._on_key_release,
-        )
-        self.listener.start()
-        logging.info("Keyboard-Listener gestartet (%s).", self.hotkey_combo)
+        def _hotkey_loop():
+            WM_HOTKEY = 0x0312
+            WM_QUIT = 0x0012
+            MOD_CONTROL = 0x0002
+            MOD_SHIFT = 0x0004
+            HK_ID_NORMAL = 1
+            HK_ID_WINDOW = 2
+
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+            self.hotkey_thread_id = kernel32.GetCurrentThreadId()
+
+            vk = ord(self.hotkey_key.upper())
+            ok_normal = bool(user32.RegisterHotKey(None, HK_ID_NORMAL, MOD_CONTROL, vk))
+            ok_window = bool(
+                user32.RegisterHotKey(None, HK_ID_WINDOW, MOD_CONTROL | MOD_SHIFT, vk)
+            )
+
+            if not ok_normal:
+                logging.error("RegisterHotKey fehlgeschlagen fuer STRG+%s", self.hotkey_key.upper())
+            if not ok_window:
+                logging.error(
+                    "RegisterHotKey fehlgeschlagen fuer STRG+SHIFT+%s",
+                    self.hotkey_key.upper(),
+                )
+            if not (ok_normal or ok_window):
+                return
+
+            logging.info(
+                "Keyboard-Listener gestartet (%s | %s).",
+                self.hotkey_combo,
+                self.window_hotkey_combo,
+            )
+
+            msg = wintypes.MSG()
+            while True:
+                result = user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
+                if result == 0 or msg.message == WM_QUIT:
+                    break
+                if msg.message == WM_HOTKEY:
+                    if msg.wParam == HK_ID_NORMAL:
+                        self.on_hotkey_pressed()
+                    elif msg.wParam == HK_ID_WINDOW:
+                        self.on_window_hotkey_pressed()
+                user32.TranslateMessage(ctypes.byref(msg))
+                user32.DispatchMessageW(ctypes.byref(msg))
+
+            user32.UnregisterHotKey(None, HK_ID_NORMAL)
+            user32.UnregisterHotKey(None, HK_ID_WINDOW)
+            self.hotkey_thread_id = None
+
+        self.hotkey_thread = threading.Thread(target=_hotkey_loop, daemon=True)
+        self.hotkey_thread.start()
 
     def restart_listener(self):
-        if self.listener:
-            self.listener.stop()
+        if self.hotkey_thread_id:
+            ctypes.windll.user32.PostThreadMessageW(self.hotkey_thread_id, 0x0012, 0, 0)
         self.start_listener()
 
-    def _on_key_press(self, key):
-        if self.listener and self.hotkey:
-            self.hotkey.press(self.listener.canonical(key))
+    def _load_readme_text(self):
+        readme_path = self._find_readme_path()
+        if not readme_path:
+            return "README.md nicht gefunden."
+        try:
+            return readme_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            logging.exception("README konnte nicht gelesen werden.")
+            return "README.md konnte nicht gelesen werden."
 
-    def _on_key_release(self, key):
-        if self.listener and self.hotkey:
-            self.hotkey.release(self.listener.canonical(key))
+    def open_project_link(self):
+        webbrowser.open(PROJECT_URL)
+
+    def open_about_dialog(self):
+        if self.about_window and self.about_window.winfo_exists():
+            self.about_window.lift()
+            self.about_window.focus_force()
+            return
+
+        win = tk.Toplevel(self.root)
+        win.title("About Transilvania")
+        win.geometry("640x500")
+        win.configure(bg="#101010")
+        win.attributes("-topmost", True)
+        self.about_window = win
+
+        title = tk.Label(
+            win,
+            text="Transilvania",
+            fg="white",
+            bg="#101010",
+            font=("Segoe UI", 15, "bold"),
+        )
+        title.pack(pady=(12, 4))
+
+        link = tk.Label(
+            win,
+            text=PROJECT_URL,
+            fg="#7fc4ff",
+            bg="#101010",
+            cursor="hand2",
+            font=("Segoe UI", 10, "underline"),
+        )
+        link.pack(pady=(0, 10))
+        link.bind("<Button-1>", lambda _e: self.open_project_link())
+
+        readme_text = ScrolledText(
+            win,
+            wrap="word",
+            bg="#171717",
+            fg="#f0f0f0",
+            insertbackground="#f0f0f0",
+            font=("Consolas", 10),
+        )
+        readme_text.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        readme_text.insert("1.0", self._load_readme_text())
+        readme_text.config(state="disabled")
 
     def hide_to_background(self):
         self.root.withdraw()
@@ -493,8 +808,8 @@ class TranslationApp:
 
     def quit_app(self, icon=None, item=None):
         def _shutdown():
-            if self.listener:
-                self.listener.stop()
+            if self.hotkey_thread_id:
+                ctypes.windll.user32.PostThreadMessageW(self.hotkey_thread_id, 0x0012, 0, 0)
             if self.icon:
                 self.icon.stop()
             self.root.quit()
