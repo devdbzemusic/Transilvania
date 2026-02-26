@@ -14,7 +14,6 @@ from tkinter import messagebox
 from tkinter.scrolledtext import ScrolledText
 
 import pyautogui
-import pyperclip
 import pystray
 import pytesseract
 import requests
@@ -321,7 +320,7 @@ class TranslationApp:
 
         tk.Label(
             panel,
-            text="Erst Markierung (Ctrl+C), dann OCR an Maus, dann Dialog-Fenster.",
+            text="Erst markierter Text (ohne Zwischenablage), dann Fenstertext.",
             font=("Arial", 9),
             fg="#d0d0d0",
             bg="#000000",
@@ -488,31 +487,61 @@ class TranslationApp:
             self.hotkey_key.upper(),
         )
 
-    def _get_selected_text_from_clipboard(self):
-        old_clipboard = ""
-        clipboard_read_ok = False
-        try:
-            old_clipboard = pyperclip.paste()
-            clipboard_read_ok = True
-        except Exception:
-            pass
+    def _get_selected_text_from_focus_control(self):
+        # Liest markierten Text direkt aus dem fokussierten Edit/RichEdit-Control
+        # ohne die Zwischenablage zu beruehren.
+        EM_GETSEL = 0x00B0
+        EM_EXGETSEL = 0x0434
+        WM_GETTEXT = 0x000D
+        WM_GETTEXTLENGTH = 0x000E
+
+        class CHARRANGE(ctypes.Structure):
+            _fields_ = [("cpMin", ctypes.c_long), ("cpMax", ctypes.c_long)]
 
         try:
-            pyautogui.hotkey("ctrl", "c")
-            time.sleep(0.12)
-            selected = (pyperclip.paste() or "").strip()
-            if selected:
-                return selected
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+
+            fg = user32.GetForegroundWindow()
+            if not fg:
+                return ""
+
+            fg_thread = user32.GetWindowThreadProcessId(fg, None)
+            cur_thread = kernel32.GetCurrentThreadId()
+            attached = bool(user32.AttachThreadInput(cur_thread, fg_thread, True))
+            try:
+                focus = user32.GetFocus()
+            finally:
+                if attached:
+                    user32.AttachThreadInput(cur_thread, fg_thread, False)
+
+            if not focus:
+                return ""
+
+            text_len = int(user32.SendMessageW(focus, WM_GETTEXTLENGTH, 0, 0))
+            if text_len <= 0:
+                return ""
+            buf = ctypes.create_unicode_buffer(text_len + 1)
+            user32.SendMessageW(focus, WM_GETTEXT, text_len + 1, ctypes.byref(buf))
+            full_text = (buf.value or "")
+            if not full_text:
+                return ""
+
+            rng = CHARRANGE(0, 0)
+            user32.SendMessageW(focus, EM_EXGETSEL, 0, ctypes.byref(rng))
+            start, end = int(rng.cpMin), int(rng.cpMax)
+
+            if end <= start:
+                packed = int(user32.SendMessageW(focus, EM_GETSEL, 0, 0))
+                start = packed & 0xFFFF
+                end = (packed >> 16) & 0xFFFF
+
+            if end > start and start >= 0:
+                return full_text[start:end].strip()
             return ""
         except Exception:
-            logging.exception("Clipboard-Markierung konnte nicht gelesen werden.")
+            logging.exception("Markierter Text konnte ohne Zwischenablage nicht gelesen werden.")
             return ""
-        finally:
-            if clipboard_read_ok:
-                try:
-                    pyperclip.copy(old_clipboard)
-                except Exception:
-                    pass
 
     def perform_translate(self, prefer_clipboard, force_window, use_ocr_fallback):
         try:
@@ -520,7 +549,7 @@ class TranslationApp:
             text = ""
 
             if prefer_clipboard:
-                text = self._get_selected_text_from_clipboard()
+                text = self._get_selected_text_from_focus_control()
                 if text:
                     logging.info("Text aus Markierung gelesen: %r", text)
 
