@@ -1,11 +1,11 @@
-# UTF-8
+﻿# UTF-8
 #
 # Windows version resource definition for PyInstaller.
 
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 0, 0, 0),
-    prodvers=(1, 0, 0, 0),
+    filevers=(1, 0, 0, 1),
+    prodvers=(1, 0, 0, 1),
     mask=0x3F,
     flags=0x0,
     OS=0x40004,
@@ -19,14 +19,14 @@ VSVersionInfo(
         StringTable(
           '040904B0',
           [
-            StringStruct('CompanyName', 'Ralf'),
+            StringStruct('CompanyName', 'Division By Zero'),
             StringStruct('FileDescription', 'Transilvania OCR Translator'),
-            StringStruct('FileVersion', '1.0.0.0'),
+            StringStruct('FileVersion', '1.0.0.1'),
             StringStruct('InternalName', 'Transilvania'),
-            StringStruct('LegalCopyright', 'Copyright (c) 2026 Ralf'),
+            StringStruct('LegalCopyright', 'Copyright (c) 2026 Ralf Lauckner'),
             StringStruct('OriginalFilename', 'Transilvania.exe'),
             StringStruct('ProductName', 'Transilvania'),
-            StringStruct('ProductVersion', '1.0.0.0')
+            StringStruct('ProductVersion', '1.0.0.1')
           ]
         )
       ]
