@@ -40,6 +40,7 @@ class TranslationApp:
         self.logo_path = self._find_logo_path()
         self.bg_path = self._find_background_path()
         self.local_tessdata_dir = self._local_tessdata_dir()
+        self.available_ocr_languages = []
         self.tesseract_path = None
         self.tesseract_ready = False
         self.tk_logo = None
@@ -163,10 +164,28 @@ class TranslationApp:
         for lang in missing:
             self._download_lang(lang)
 
+        available = []
+        unresolved = []
+        for lang in self.ocr_languages:
+            traineddata = self.local_tessdata_dir / f"{lang}.traineddata"
+            if traineddata.exists():
+                available.append(lang)
+            else:
+                unresolved.append(lang)
+
+        self.available_ocr_languages = available
+        if unresolved:
+            logging.warning(
+                "OCR Sprachdateien fehlen weiterhin: %s",
+                "+".join(unresolved),
+            )
+        if not self.available_ocr_languages:
+            logging.error("Keine OCR Sprachdateien verfuegbar.")
+
         logging.info(
-            "OCR Sprachordner: %s | Sprachen: %s",
+            "OCR Sprachordner: %s | Verfuegbar: %s",
             self.local_tessdata_dir,
-            "+".join(self.ocr_languages),
+            "+".join(self.available_ocr_languages) or "keine",
         )
 
     def _download_lang(self, lang):
@@ -285,8 +304,10 @@ class TranslationApp:
 
     def _get_selected_text_from_clipboard(self):
         old_clipboard = ""
+        clipboard_read_ok = False
         try:
             old_clipboard = pyperclip.paste()
+            clipboard_read_ok = True
         except Exception:
             pass
 
@@ -301,7 +322,7 @@ class TranslationApp:
             logging.exception("Clipboard-Markierung konnte nicht gelesen werden.")
             return ""
         finally:
-            if old_clipboard:
+            if clipboard_read_ok:
                 try:
                     pyperclip.copy(old_clipboard)
                 except Exception:
@@ -329,12 +350,23 @@ class TranslationApp:
                     )
                     return
 
+                if not self.available_ocr_languages:
+                    self.root.after(
+                        0,
+                        lambda: self.show_overlay(
+                            "Keine OCR-Sprachdateien verfuegbar. Pruefe Internet/Tesseract-Setup.",
+                            x,
+                            max(10, y - 50),
+                        ),
+                    )
+                    return
+
                 bbox = (x - 150, y - 40, x + 150, y + 40)
                 screenshot = ImageGrab.grab(bbox)
                 screenshot = ImageOps.grayscale(screenshot)
                 text = pytesseract.image_to_string(
                     screenshot,
-                    lang="+".join(self.ocr_languages),
+                    lang="+".join(self.available_ocr_languages),
                     config=f'--tessdata-dir "{self.local_tessdata_dir}"',
                 ).strip()
                 logging.info("OCR fallback bei Maus=(%s,%s), OCR=%r", x, y, text)
