@@ -1,5 +1,7 @@
 ﻿# Transilvania
 
+![Transilvania Logo](assets/logos/dbzs_logo.svg)
+
 Transilvania ist eine kleine Windows-Desktop-App zur schnellen Uebersetzung von Text per Hotkey.
 
 ## Kurzbeschreibung
