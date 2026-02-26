@@ -75,7 +75,15 @@ class TranslationApp:
         return dirs
 
     def _find_logo_path(self):
-        names = ("logo.ico", "logo.png", "app_logo.ico", "app_logo.png", "dbz.ico")
+        names = (
+            "resources/dbz.ico",
+            "resources/logo.ico",
+            "logo.ico",
+            "logo.png",
+            "app_logo.ico",
+            "app_logo.png",
+            "dbz.ico",
+        )
         for base in self._resource_dirs():
             for name in names:
                 candidate = base / name
@@ -85,7 +93,7 @@ class TranslationApp:
 
     def _find_background_path(self):
         candidates = (
-            Path("assets") / "logos" / "dbzs_logo_bg.png",
+            Path("resources") / "dbzs_logo_bg.png",
             Path("dbzs_logo_bg.png"),
         )
         for base in self._resource_dirs():

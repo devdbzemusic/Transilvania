@@ -7,3 +7,5 @@ dist/
 *.log
 *.7z
 *.spec
+
+assets/
