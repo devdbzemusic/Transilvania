@@ -4,6 +4,9 @@
 
 Transilvania ist eine kleine Windows-Desktop-App zur schnellen Uebersetzung von Text per Hotkey.
 
+## Download
+- Windows EXE (Release): [Transilvania.exe](https://github.com/devdbzemusic/Transilvania/releases/download/v1.0.0.1/Transilvania.exe)
+
 ## Kurzbeschreibung
 - Startet als Tkinter-App mit Tray-Icon im Hintergrund.
 - Hotkey (Standard: `Strg + D`) kann in den Einstellungen geaendert werden.
